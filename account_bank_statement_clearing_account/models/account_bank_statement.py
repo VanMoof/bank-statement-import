@@ -1,5 +1,7 @@
-# coding: utf-8
-from openerp import api, models
+# © 2017 Opener BV (<https://opener.amsterdam>)
+# © 2020 Vanmoof BV (<https://www.vanmoof.com>)
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
+from odoo import api, models
 
 
 class BankStatement(models.Model):
@@ -12,10 +14,10 @@ class BankStatement(models.Model):
                 not self.journal_id.default_debit_account_id.reconcile):
             return False
         account = self.journal_id.default_debit_account_id
-        currency = self.journal_id.currency or self.company_id.currency_id
+        currency = self.journal_id.currency_id or self.company_id.currency_id
 
         def get_bank_line(st_line):
-            for line in st_line.journal_entry_id.line_id:
+            for line in st_line.journal_entry_ids:
                 if st_line.amount > 0:
                     compare_amount = st_line.amount
                     field = 'debit'
@@ -46,10 +48,9 @@ class BankStatement(models.Model):
         lines = self.get_reconcile_clearing_account_lines()
         if not lines:
             return False
-        if any(line.reconcile_id or line.reconcile_partial_id
-               for line in lines):
+        if any(line.full_reconcile_id for line in lines):
             return False
-        lines.reconcile_partial()
+        lines.reconcile()
 
     @api.multi
     def unreconcile_clearing_account(self):
@@ -57,13 +58,9 @@ class BankStatement(models.Model):
         lines = self.get_reconcile_clearing_account_lines()
         if not lines:
             return False
-        reconciliation = lines[0].reconcile_id
-        if reconciliation and all(
-                line.reconcile_id == reconciliation
-                for line in lines) and all(
-                    line in lines
-                    for line in reconciliation.line_id):
-            reconciliation.unlink()
+        reconciliation = lines[0].full_reconcile_id
+        if reconciliation and lines == reconciliation.reconciled_line_ids:
+            lines.remove_move_reconcile()
 
     @api.multi
     def button_draft(self):
