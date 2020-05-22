@@ -3,34 +3,38 @@
 # © 2015 Therp BV (<http://therp.nl>)
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 import base64
-from odoo import tests
-from odoo.tests.common import TransactionCase
+from odoo.exceptions import UserError
+from odoo.tests.common import SavepointCase
 from odoo.modules.module import get_module_resource
 
 
-@tests.tagged('standard', 'at_install')
-class TestImportAdyen(TransactionCase):
-    def setUp(self):
-        super(TestImportAdyen, self).setUp()
-        self.journal = self.env['account.journal'].create({
-            'company_id': self.env.user.company_id.id,
+class TestImportAdyen(SavepointCase):
+    @classmethod
+    def setUpClass(cls):
+        super(TestImportAdyen, cls).setUpClass()
+        cls.journal = cls.env['account.journal'].create({
+            'company_id': cls.env.user.company_id.id,
             'name': 'Adyen test',
             'code': 'ADY',
             'type': 'bank',
-        })
-        self.journal.default_debit_account_id.reconcile = True
-        self.journal.write({
             'adyen_merchant_account': 'YOURCOMPANY_ACCOUNT',
             'update_posted': True,
-            'currency_id': self.ref('base.USD'),
+            'currency_id': cls.env.ref('base.USD').id,
         })
+        # Enable reconcilation on the default journal account to trigger
+        # the functionality from account_bank_statement_clearing_account
+        cls.journal.default_debit_account_id.reconcile = True
 
-    def test01_import_adyen(self):
+    def test_01_import_adyen(self):
+        """ Test that the Adyen statement can be imported and that the
+        lines on the default journal (clearing) account are fully reconciled
+        with each other """
         self._test_statement_import(
             'account_bank_statement_import_adyen', 'adyen_test.xlsx',
             'YOURCOMPANY_ACCOUNT 2016/48', self.journal)
         statement = self.env['account.bank.statement'].search(
             [], order='create_date desc', limit=1)
+        self.assertEqual(statement.journal_id, self.journal)
         self.assertEqual(len(statement.line_ids), 22)
         self.assertTrue(
             self.env.user.company_id.currency_id.is_zero(
@@ -51,69 +55,54 @@ class TestImportAdyen(TransactionCase):
             ('statement_id', '=', statement.id)])
         reconcile = lines.mapped('full_reconcile_id')
         self.assertEqual(len(reconcile), 1)
-        self.assertTrue(lines.mapped('matched_debit_ids'))
-        self.assertTrue(lines.mapped('matched_credit_ids'))
         self.assertEqual(lines, reconcile.reconciled_line_ids)
 
+        # Reset the bank statement to see the counterpart lines being
+        # unreconciled
         statement.button_draft()
         self.assertEqual(statement.state, 'open')
         self.assertFalse(lines.mapped('matched_debit_ids'))
         self.assertFalse(lines.mapped('matched_credit_ids'))
         self.assertFalse(lines.mapped('full_reconcile_id'))
 
-    def test_import_adyen_credit_fees(self):
+        # Confirm the statement without the correct clearing account settings
+        self.journal.default_debit_account_id.reconcile = False
+        statement.button_confirm_bank()
+        self.assertEqual(statement.state, 'confirm')
+        self.assertFalse(lines.mapped('matched_debit_ids'))
+        self.assertFalse(lines.mapped('matched_credit_ids'))
+        self.assertFalse(lines.mapped('full_reconcile_id'))
+
+    def test_02_import_adyen_credit_fees(self):
+        """ Import an Adyen statement with credit fees """
         self._test_statement_import(
             'account_bank_statement_import_adyen',
             'adyen_test_credit_fees.xlsx',
             'YOURCOMPANY_ACCOUNT 2016/8', self.journal)
 
+    def test_03_import_adyen_invalid(self):
+        """ Trying to hit that coverall target """
+        with self.assertRaisesRegex(UserError, 'Could not make sense'):
+            self._test_statement_import(
+                'account_bank_statement_import_adyen',
+                'adyen_test_invalid.xls',
+                'invalid', self.journal)
+
     def _test_statement_import(
-            self, module_name, file_name, statement_name, journal_id=False,
-            local_account=False, start_balance=False, end_balance=False,
-            transactions=None):
+            self, module_name, file_name, statement_name, journal_id=False):
         """Test correct creation of single statement."""
-        import_model = self.env['account.bank.statement.import']
-        partner_bank_model = self.env['res.partner.bank']
-        statement_model = self.env['account.bank.statement']
         statement_path = get_module_resource(
             module_name,
             'test_files',
             file_name
         )
         statement_file = open(statement_path, 'rb').read()
-        bank_statement_id = import_model.create(
-            dict(
-                data_file=base64.b64encode(statement_file),
-                filename=file_name,
-            )
-        )
-        bank_statement_id.with_context(journal_id=journal_id.id).import_file()
-        # Check wether bank account has been created:
-        if local_account:
-            bids = partner_bank_model.search(
-                [('acc_number', '=', local_account)])
-            self.assertTrue(
-                bids,
-                'Bank account %s not created from statement' % local_account
-            )
-        # statement name is account number + '-' + date of last 62F line:
-        ids = statement_model.search([('name', '=', statement_name)])
-        self.assertTrue(ids)
-
-        statement_obj = ids[0]
-        if start_balance:
-            self.assertTrue(
-                abs(statement_obj.balance_start - start_balance) < 0.00001,
-                'Start balance %f not equal to expected %f' %
-                (statement_obj.balance_start, start_balance)
-            )
-        if end_balance:
-            self.assertTrue(
-                abs(statement_obj.balance_end_real - end_balance) < 0.00001,
-                'End balance %f not equal to expected %f' %
-                (statement_obj.balance_end_real, end_balance)
-            )
-        # Maybe we need to test transactions?
-        if transactions:
-            for transaction in transactions:
-                self._test_transaction(statement_obj, **transaction)
+        import_wizard = self.env['account.bank.statement.import'].create({
+            'data_file': base64.b64encode(statement_file),
+            'filename': file_name})
+        import_wizard.import_file()
+        # statement name is account number + '-' + date of last line:
+        statements = self.env['account.bank.statement'].search(
+            [('name', '=', statement_name)])
+        self.assertTrue(statements)
+        return statements

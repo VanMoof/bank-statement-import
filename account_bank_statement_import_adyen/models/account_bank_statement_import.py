@@ -4,13 +4,12 @@ from io import BytesIO
 from openpyxl import load_workbook
 from zipfile import BadZipfile
 
-from odoo import models, api
-from odoo.exceptions import Warning as UserError
-from odoo.tools.misc import DEFAULT_SERVER_DATE_FORMAT as DATEFMT
+from odoo import api, models, fields
+from odoo.exceptions import UserError
 from odoo.tools.translate import _
 
 
-class Import(models.TransientModel):
+class AccountBankStatementImport(models.TransientModel):
     _inherit = 'account.bank.statement.import'
 
     @api.model
@@ -18,32 +17,20 @@ class Import(models.TransientModel):
         """Parse an Adyen xlsx file and map merchant account strings
         to journals. """
         try:
-            currency_code, account_number, statements = self.import_adyen_xlsx(
-                data_file)
+            return self.import_adyen_xlsx(data_file)
         except ValueError:
-            return super(Import, self)._parse_file(data_file)
+            return super(AccountBankStatementImport, self)._parse_file(
+                data_file)
 
-        for statement in statements:
-            merchant_id = statement['local_account']
+    def _find_additional_data(self, currency_code, account_number):
+        """ Try to find journal by Adyen merchant account """
+        if account_number:
             journal = self.env['account.journal'].search([
-                ('adyen_merchant_account', '=', merchant_id)], limit=1)
+                ('adyen_merchant_account', '=', account_number)], limit=1)
             if journal:
-                statement['adyen_journal_id'] = journal.id
-            else:
-                raise UserError(
-                    _('Please create a journal with merchant account "%s"') %
-                    merchant_id)
-            statement['local_account'] = False
-        return currency_code, account_number, statements
-
-    @api.model
-    def _import_statement(self, stmt_vals):
-        """ Propagate found journal to context, fromwhere it is picked up
-        in _get_journal """
-        journal_id = stmt_vals.pop('adyen_journal_id', None)
-        if journal_id:
-            self = self.with_context(journal_id=journal_id)
-        return super(Import, self)._import_statement(stmt_vals)
+                self = self.with_context(journal_id=journal.id)
+        return super(AccountBankStatementImport, self)._find_additional_data(
+            currency_code, account_number)
 
     @api.model
     def balance(self, row):
@@ -52,11 +39,11 @@ class Import(models.TransientModel):
             for i in (16, 17, 18, 19, 20))
 
     @api.model
-    def import_adyen_transaction(self, statement, row):
+    def import_adyen_transaction(self, statement, statement_id, row):
+        transaction_id = str(len(statement['transactions'])).zfill(4)
         transaction = dict(
-            unique_import_id=(statement['statement_id'] +
-                              str(len(statement['transactions'])).zfill(4)),
-            date=row[6].strftime(DATEFMT),
+            unique_import_id=statement_id + transaction_id,
+            date=fields.Date.from_string(row[6]),
             amount=self.balance(row),
             note='%s %s %s %s' % (row[2], row[3], row[4], row[21]),
             name="%s" % (row[3] or row[4] or row[9]),
@@ -71,6 +58,7 @@ class Import(models.TransientModel):
         fees = 0.0
         balance = 0.0
         payout = 0.0
+        statement_id = None
 
         with BytesIO() as buf:
             buf.write(data_file)
@@ -96,13 +84,13 @@ class Import(models.TransientModel):
                 if not statement:
                     statement = {'transactions': []}
                     statements.append(statement)
-                    statement['statement_id'] = '%s %s/%s' % (
+                    statement_id = '%s %s/%s' % (
                         row[2], row[6].strftime('%Y'), int(row[23]))
-                    statement['local_currency'] = row[14]
-                    statement['local_account'] = row[2]
+                    currency_code = row[14]
+                    merchant_id = row[2]
                     statement['name'] = '%s %s/%s' % (
                         row[2], row[6].year, row[23])
-                date = row[6].strftime(DATEFMT)
+                date = fields.Date.from_string(row[6])
                 if not statement.get('date') or statement.get('date') > date:
                     statement['date'] = date
 
@@ -111,7 +99,7 @@ class Import(models.TransientModel):
                     payout -= self.balance(row)
                 else:
                     balance += self.balance(row)
-                self.import_adyen_transaction(statement, row)
+                self.import_adyen_transaction(statement, statement_id, row)
                 fees += sum(
                     row[i] if row[i] else 0.0
                     for i in (17, 18, 19, 20))
@@ -121,12 +109,10 @@ class Import(models.TransientModel):
                 'Not an Adyen statement. Did not encounter header row.')
 
         if fees:
+            transaction_id = str(len(statement['transactions'])).zfill(4)
             transaction = dict(
-                unique_import_id=(statement['statement_id'] +
-                                  str(len(statement['transactions'])
-                                      ).zfill(4)),
-                date=max(
-                    t['date'] for t in statement['transactions']),
+                unique_import_id=statement_id + transaction_id,
+                date=max(t['date'] for t in statement['transactions']),
                 amount=-fees,
                 name='Commission, markup etc. batch %s' % (int(row[23])),
             )
@@ -141,4 +127,4 @@ class Import(models.TransientModel):
             raise UserError(
                 _('Parse error. Balance %s not equal to merchant '
                   'payout %s') % (balance, payout))
-        return statement['local_currency'], None, statements
+        return currency_code, merchant_id, statements
