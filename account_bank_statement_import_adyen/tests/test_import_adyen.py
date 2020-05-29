@@ -31,7 +31,7 @@ class TestImportAdyen(SavepointCase):
         with each other """
         self._test_statement_import(
             'account_bank_statement_import_adyen', 'adyen_test.xlsx',
-            'YOURCOMPANY_ACCOUNT 2016/48', self.journal)
+            'YOURCOMPANY_ACCOUNT 2016/48')
         statement = self.env['account.bank.statement'].search(
             [], order='create_date desc', limit=1)
         self.assertEqual(statement.journal_id, self.journal)
@@ -78,7 +78,7 @@ class TestImportAdyen(SavepointCase):
         self._test_statement_import(
             'account_bank_statement_import_adyen',
             'adyen_test_credit_fees.xlsx',
-            'YOURCOMPANY_ACCOUNT 2016/8', self.journal)
+            'YOURCOMPANY_ACCOUNT 2016/8')
 
     def test_03_import_adyen_invalid(self):
         """ Trying to hit that coverall target """
@@ -86,10 +86,10 @@ class TestImportAdyen(SavepointCase):
             self._test_statement_import(
                 'account_bank_statement_import_adyen',
                 'adyen_test_invalid.xls',
-                'invalid', self.journal)
+                'invalid')
 
     def _test_statement_import(
-            self, module_name, file_name, statement_name, journal_id=False):
+            self, module_name, file_name, statement_name):
         """Test correct creation of single statement."""
         statement_path = get_module_resource(
             module_name,
